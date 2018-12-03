@@ -76,9 +76,9 @@ class DeepNetTrainer(object):
     
     def _to_device(self, T, device):
         if isinstance(T, (list, tuple)):
-            T = [t.to(device) for t in T]
+            T = [self._to_device(t, device) for t in T]
         elif isinstance(T, dict):
-            T = {k: t.to(device) for k, t in T.items()}
+            T = {k: self._to_device(t, device) for k, t in T.items()}
         else:
             T = T.to(device)
         return T
@@ -96,6 +96,7 @@ class DeepNetTrainer(object):
 
                 # training phase
                 # ==============
+                self.model = self.model.train()
                 for cb in self.callbacks:
                     cb.on_epoch_begin(curr_epoch, self.metrics)
 
@@ -107,7 +108,7 @@ class DeepNetTrainer(object):
                 for curr_batch, (X, Y) in enumerate(train_data):
 
                     X = self._to_device(X, device)
-                    #Y = self._to_device(Y, device)
+                    Y = self._to_device(Y, device)
 
                     mb_size = X.size(0)
                     epo_samples += mb_size
@@ -134,6 +135,7 @@ class DeepNetTrainer(object):
                 # validation phase
                 # ================
                 if self.has_validation:
+                    self.model = self.model.eval()
                     with torch.no_grad():
                         epo_samples = 0
                         epo_batches = 0
@@ -143,7 +145,7 @@ class DeepNetTrainer(object):
                         for curr_batch, (X, Y) in enumerate(valid_data):
 
                             X = self._to_device(X, device)
-                            #Y = self._to_device(Y, device)
+                            Y = self._to_device(Y, device)
 
                             mb_size = X.size(0)
                             epo_samples += mb_size
@@ -210,7 +212,7 @@ class DeepNetTrainer(object):
                 for curr_batch, (X, Y) in enumerate(data_loader):
 
                     X = self._to_device(X, device)
-                    #Y = self._to_device(Y, device)
+                    Y = self._to_device(Y, device)
 
                     mb_size = X.size(0)
                     epo_samples += mb_size
@@ -451,11 +453,12 @@ class PrintCallback(Callback):
 
     def on_epoch_begin(self, epoch, metrics):
         self.t0 = time.time()
+        self.lrs = [group['lr'] for group in self.trainer.optimizer.state_dict()['param_groups']]
 
     def on_epoch_end(self, epoch, metrics):
             etime = time.time() - self.t0
 
-            print(f'{epoch:3d}: {etime:5.1f}s   T:', end=' ')
+            print(f'{epoch:3d} (LRs: {self.lrs}): {etime:5.1f}s   T:', end=' ')
             for metric_name, metric_values in metrics['train'].items():
                 metric_value = metric_values[-1]
                 if metric_value is not None:
@@ -655,6 +658,7 @@ class SGDRestarts(_LRScheduler, Callback):
         
         self._n_batches = n_batches
         self.verbose = verbose
+        self.history = []
         
         super().__init__(optimizer, last_epoch)
         
@@ -677,7 +681,7 @@ class SGDRestarts(_LRScheduler, Callback):
         plt.xticks(np.arange(1, nepochs+2))
         
     
-    def get_lr(self, cepoch, cbatch):
+    def get_lr(self, lr, cepoch, cbatch):
         # Return learning rates for current epoch and batch
         if self.last_epoch == -1:
             # First epoch
@@ -694,15 +698,16 @@ class SGDRestarts(_LRScheduler, Callback):
             self.Tcur = 0
             self.restarts += 1
             # New cosine period
-            self.Ti = self.To * self.Tmul**self.restarts
+            self.Ti = self.To * (self.Tmul**self.restarts)
             
         # Step: calculate step, in radians, so that the first batch after restart has
         # learning rate `lr` and the last batch before restart has eta_min
         step = self.Ti / max(1, ((self.Ti * self.n_batches) - 1))
         x = step * (self.Tcur*self.n_batches + cbatch)
     
-        return [self.eta_min + (lr - self.eta_min) * (1 + math.cos(x*math.pi/self.Ti)) / 2
-                for lr in self.base_lrs]
+#         return [self.eta_min + (lr - self.eta_min) * (1 + math.cos(x*math.pi/self.Ti)) / 2
+#                 for lr in self.base_lrs]
+        return self.eta_min + (lr - self.eta_min) * (1 + math.cos(x*math.pi/self.Ti)) / 2
 
 
     def step(self, epoch, batch=None):
@@ -710,35 +715,23 @@ class SGDRestarts(_LRScheduler, Callback):
             return
         if epoch is None:
             epoch = self.last_epoch + 1
+#         for param_group, lr in zip(self.optimizer.param_groups,
+#                                    self.get_lr(epoch, batch)):
+#             param_group['lr'] = lr
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = self.get_lr(param_group['initial_lr'], epoch, batch)
         self.last_epoch = epoch
-        for param_group, lr in zip(self.optimizer.param_groups,
-                                   self.get_lr(epoch, batch)):
-            param_group['lr'] = lr
         
         
     def on_train_begin(self, n_epochs, metrics):
         self.last_epoch = self.trainer.last_epoch
+        
+    def on_batch_begin(self, *args):
+        self.history.append(self.optimizer.param_groups[0]['lr'])
    
     
     def on_batch_end(self, cepoch, cbatch, *args):
-        
-#         if self.last_epoch == -1:
-#             # First epoch
-#             self.last_epoch = cepoch
-#         elif cepoch > self.last_epoch:
-#             # New epoch. Increase epochs performed since last restart
-#             self.last_epoch = cepoch
-#             self.Tcur += 1
-            
-#         if self.Tcur == self.Ti:
-#             # Restart learning rate
-#             if self.verbose:
-#                 print('Restarting learning rates.')
-#             self.Tcur = 0
-#             self.restarts += 1
-#             # New cosine period
-#             self.Ti = self.To * self.Tmul**self.restarts
-        
+        # import pdb; pdb.set_trace()
         self.step(cepoch, cbatch)
         
 
