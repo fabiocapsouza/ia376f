@@ -726,11 +726,11 @@ class SGDRestarts(_LRScheduler, Callback):
     def on_train_begin(self, n_epochs, metrics):
         self.last_epoch = self.trainer.last_epoch
         
-    def on_batch_begin(self, *args):
+    def on_batch_end(self, *args):
         self.history.append(self.optimizer.param_groups[0]['lr'])
    
     
-    def on_batch_end(self, cepoch, cbatch, *args):
+    def on_batch_begin(self, cepoch, cbatch, *args):
         # import pdb; pdb.set_trace()
         self.step(cepoch, cbatch)
         
