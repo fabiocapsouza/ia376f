@@ -260,6 +260,7 @@ class DeepNetTrainer(object):
     def save_state(self, file_basename):
         cpu_model = self.model.to(torch.device('cpu'))
         save_trainer_state(file_basename, cpu_model, self.metrics)
+        self.model = self.model.to(torch.device(self.dev_name))
 
     def predict_loader(self, data_loader):
         device = torch.device(self.dev_name)
@@ -299,8 +300,64 @@ class DeepNetTrainer(object):
 
     def summary(self):
         pass
+    
+    
+    def lr_find(self, dataloader, min_lr=1e-7, max_lr=10, linear=False, num_it=None):
+        linear = linear
+        num_it = num_it or len(dataloader)
+        ratio = max_lr/min_lr
+        lr_mult = (ratio/num_it) if linear else ratio**(1/num_it)
+        best = 1e9
+        
+        optimizer = torch.optim.SGD(self.model.parameters(), lr=min_lr)
+        if linear:
+            lambda_schd = lambda it: lr_mult*it
+        else:
+            lambda_schd = lambda it: lr_mult**it
+        lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda_schd)
+        losses = []
+        lrs = []
+        self.save_state('tmp')
+        
+        device = torch.device(self.dev_name)
+        self.model = self.model.train()
+        
+        try:
+            for i, (X, Y) in enumerate(dataloader):
+                print(i, end='\r')
+                X = self._to_device(X, device)
+                Y = self._to_device(Y, device)
+                
+                lr_scheduler.step()
+                lr = optimizer.param_groups[0]['lr']
+                lrs.append(lr)
 
+                optimizer.zero_grad()
+                Ypred = self.model.forward(X)
+                loss = self.criterion(Ypred, Y)
+                loss.backward()
+                optimizer.step()
 
+                iloss = loss.cpu().item()
+                losses.append(iloss)
+                if iloss < best:
+                    best = iloss
+                elif iloss > best * 10000 or i == num_it-1:
+                    break
+            
+        except:
+            raise
+        finally:
+            self.load_state('tmp')
+            
+        plt.ylabel("validation loss")
+        plt.xlabel("learning rate (log scale)")
+        plt.plot(lrs, losses)
+        plt.xscale('log')
+        
+        return lrs, losses
+
+        
 def load_trainer_state(file_basename, model, metrics):
     model.load_state_dict(torch.load(file_basename + '.model', map_location=lambda storage, loc: storage))
     if os.path.isfile(file_basename + '.histo'):
@@ -458,7 +515,7 @@ class PrintCallback(Callback):
     def on_epoch_end(self, epoch, metrics):
             etime = time.time() - self.t0
 
-            print(f'{epoch:3d} (LRs: {self.lrs}): {etime:5.1f}s   T:', end=' ')
+            print(f'{epoch:3d} (LRs: {self.lrs[0]:.2e}): {etime:5.1f}s   T:', end=' ')
             for metric_name, metric_values in metrics['train'].items():
                 metric_value = metric_values[-1]
                 if metric_value is not None:
@@ -727,11 +784,13 @@ class SGDRestarts(_LRScheduler, Callback):
         self.last_epoch = self.trainer.last_epoch
         
     def on_batch_end(self, *args):
-        self.history.append(self.optimizer.param_groups[0]['lr'])
+        pass
+#         self.history.append(self.optimizer.param_groups[0]['lr'])
    
     
     def on_batch_begin(self, cepoch, cbatch, *args):
         # import pdb; pdb.set_trace()
+        self.history.append(self.optimizer.param_groups[0]['lr'])
         self.step(cepoch, cbatch)
         
 
